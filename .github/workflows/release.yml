@@ -131,13 +131,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$HOME/vendor"
+          dest="$HOME/vendor/rg-src"
+          mkdir -p "$dest" "$HOME/vendor"
           url="https://github.com/BurntSushi/ripgrep/releases/download/15.0.0/ripgrep-15.0.0-${{ matrix.rg_triple }}.tar.gz"
           curl -fL --retry 8 --retry-all-errors --retry-delay 2 \
             -H "Authorization: Bearer ${GH_TOKEN}" \
-            -o /tmp/rg.tgz "$url"
-          tar -xzf /tmp/rg.tgz -C /tmp
-          rg_bin="$(find /tmp -type f -name rg | head -n 1)"
+            -o "$HOME/vendor/rg.tgz" "$url"
+          tar -xzf "$HOME/vendor/rg.tgz" -C "$dest"
+          rg_bin="$(find "$dest" -type f -name rg | head -n 1)"
           test -n "$rg_bin"
           chmod +x "$rg_bin"
           cp "$rg_bin" "$HOME/vendor/rg"
