@@ -243,18 +243,22 @@ jobs:
           TAG: ${{ env.RELEASE_TAG }}
         run: |
           set -euo pipefail
-          NOTES="Supercharge AI ${TAG}
+          NOTES_FILE="$(mktemp)"
+          cat > "$NOTES_FILE" <<EOF
+          Supercharge AI ${TAG}
 
-Install latest:
-  curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/scripts/install.sh | bash
+          Install latest:
+            curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/scripts/install.sh | bash
 
-Install this version:
-  curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/scripts/install.sh | bash -s ${TAG#v}"
+          Install this version:
+            curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/scripts/install.sh | bash -s ${TAG#v}
+          EOF
           if gh release view "$TAG" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
             gh release upload "$TAG" release/* --repo "${GITHUB_REPOSITORY}" --clobber
           else
             gh release create "$TAG" release/* \
               --repo "${GITHUB_REPOSITORY}" \
               --title "${TAG}" \
-              --notes "$NOTES"
+              --notes-file "$NOTES_FILE"
           fi
+          rm -f "$NOTES_FILE"
