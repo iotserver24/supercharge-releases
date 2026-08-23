@@ -104,7 +104,11 @@ jobs:
       - name: Install native build prerequisites (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: choco install protoc --no-progress -y
+        run: |
+          choco install protoc --no-progress -y
+          $protoc = (Get-Command protoc).Source
+          "PROTOC=$protoc" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          if (Test-Path source/bin/protoc) { Remove-Item source/bin/protoc -Force }
 
       - uses: actions/cache@v4
         with:
@@ -118,6 +122,7 @@ jobs:
 
       - name: Build Supercharge CLI
         working-directory: source
+        shell: bash
         run: cargo build --locked --release -p supercharge-pager-bin --bin supercharge-pager --target ${{ matrix.target }}
 
       - name: Package CLI artifact
