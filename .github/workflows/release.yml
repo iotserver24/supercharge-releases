@@ -1,0 +1,260 @@
+name: Build and publish release
+
+# Runs on the PUBLIC repo for unlimited GitHub Actions minutes.
+# Clones the PRIVATE source repo using SUPERCHARGE_SOURCE_TOKEN, builds
+# cross-platform binaries, and publishes a GitHub Release here.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to publish, for example v1.0.5
+        required: true
+        default: v1.0.5
+        type: string
+      source_ref:
+        description: Git ref to build from in the private source repo (tag, branch, or SHA)
+        required: true
+        default: v1.0.5
+        type: string
+      source_repo:
+        description: Private source repository (owner/name)
+        required: true
+        default: iotserver24/supercharge
+        type: string
+      build_daemon:
+        description: Also build the linux daemon binary for E2B/self-host
+        required: true
+        default: true
+        type: boolean
+  repository_dispatch:
+    types: [release]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.client_payload.tag }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUSTUP_TOOLCHAIN: 1.94.1
+  RUSTFLAGS: -C debuginfo=0
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.client_payload.tag }}
+  SOURCE_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.source_ref || github.event.client_payload.source_ref || github.event.client_payload.tag }}
+  SOURCE_REPO: ${{ github.event_name == 'workflow_dispatch' && inputs.source_repo || github.event.client_payload.source_repo || 'iotserver24/supercharge' }}
+
+jobs:
+  build-cli:
+    name: CLI ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            platform: linux-x86_64
+            ext: ""
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            platform: linux-aarch64
+            ext: ""
+          - os: macos-14
+            target: x86_64-apple-darwin
+            platform: macos-x86_64
+            ext: ""
+          - os: macos-14
+            target: aarch64-apple-darwin
+            platform: macos-aarch64
+            ext: ""
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            platform: windows-x86_64
+            ext: .exe
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+            platform: windows-aarch64
+            ext: .exe
+    steps:
+      - name: Check out private source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SOURCE_REPO }}
+          token: ${{ secrets.SUPERCHARGE_SOURCE_TOKEN }}
+          ref: ${{ env.SOURCE_REF }}
+          path: source
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.1
+          targets: ${{ matrix.target }}
+
+      - name: Install native build prerequisites (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends protobuf-compiler
+
+      - name: Install native build prerequisites (macOS)
+        if: runner.os == 'macOS'
+        run: brew install protobuf
+
+      - name: Install native build prerequisites (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: choco install protoc --no-progress -y
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            source/target
+          key: ${{ matrix.os }}-${{ matrix.target }}-cli-${{ hashFiles('source/**/Cargo.lock') }}
+          restore-keys: |
+            ${{ matrix.os }}-${{ matrix.target }}-cli-
+
+      - name: Build Supercharge CLI
+        working-directory: source
+        run: cargo build --locked --release -p supercharge-pager-bin --bin supercharge-pager --target ${{ matrix.target }}
+
+      - name: Package CLI artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          src="source/target/${{ matrix.target }}/release/supercharge-pager${{ matrix.ext }}"
+          base="supercharge-${{ matrix.platform }}${{ matrix.ext }}"
+          cp "$src" "dist/$base"
+          cp "$src" "dist/sc-${{ matrix.platform }}${{ matrix.ext }}"
+          chmod +x dist/* 2>/dev/null || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cli-${{ matrix.platform }}
+          path: dist/*
+
+  build-daemon:
+    name: Daemon linux-x86_64
+    if: ${{ github.event_name == 'repository_dispatch' && (github.event.client_payload.build_daemon != false) || github.event_name == 'workflow_dispatch' && inputs.build_daemon }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Check out private source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SOURCE_REPO }}
+          token: ${{ secrets.SUPERCHARGE_SOURCE_TOKEN }}
+          ref: ${{ env.SOURCE_REF }}
+          path: source
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.1
+
+      - name: Install native build prerequisites
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends protobuf-compiler
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            source/target
+          key: ubuntu-daemon-${{ hashFiles('source/**/Cargo.lock') }}
+          restore-keys: ubuntu-daemon-
+
+      - name: Build daemon release binary
+        working-directory: source
+        run: cargo build --locked --release -p supercharge-superagent --features e2b --bin supercharge-superagent-server
+
+      - name: Package daemon artifact
+        run: |
+          mkdir -p dist
+          cp source/target/release/supercharge-superagent-server dist/superagent-server-linux-x86_64
+          chmod +x dist/superagent-server-linux-x86_64
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: daemon-linux-x86_64
+          path: dist/*
+
+  publish:
+    name: Publish GitHub Release
+    needs: [build-cli, build-daemon]
+    if: always() && needs.build-cli.result == 'success' && (needs.build-daemon.result == 'success' || needs.build-daemon.result == 'skipped')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Check out private source (E2B template)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SOURCE_REPO }}
+          token: ${{ secrets.SUPERCHARGE_SOURCE_TOKEN }}
+          ref: ${{ env.SOURCE_REF }}
+          path: source
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            sandbox/e2b-agent-template
+            deploy/install-supercharge.sh
+
+      - name: Prepare release bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ env.RELEASE_TAG }}"
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid release tag: $TAG" >&2
+            exit 1
+          fi
+          VERSION="${TAG#v}"
+          mkdir -p release
+          find artifacts -type f -exec cp {} release/ \;
+          cp scripts/install.sh release/install.sh
+          cp scripts/install.ps1 release/install.ps1
+          if [ -f source/deploy/install-supercharge.sh ]; then
+            cp source/deploy/install-supercharge.sh release/install-supercharge.sh
+            chmod +x release/install-supercharge.sh
+          fi
+          chmod +x release/install.sh
+          printf '%s\n' "$VERSION" > release/version
+          if [ -d source/sandbox/e2b-agent-template ]; then
+            tar -C source/sandbox -czf release/superagent-e2b-template-source.tar.gz e2b-agent-template
+          fi
+          cat > release/e2b-manifest.json <<EOF
+          {"version":"${TAG}","daemon":"superagent-server-linux-x86_64","cli":"supercharge-linux-x86_64"}
+          EOF
+          sha256sum release/* > release/SHA256SUMS
+          ls -la release/
+          cat release/SHA256SUMS
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ env.RELEASE_TAG }}
+        run: |
+          set -euo pipefail
+          NOTES="Supercharge AI ${TAG}
+
+Install latest:
+  curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/scripts/install.sh | bash
+
+Install this version:
+  curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/scripts/install.sh | bash -s ${TAG#v}"
+          if gh release view "$TAG" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release upload "$TAG" release/* --repo "${GITHUB_REPOSITORY}" --clobber
+          else
+            gh release create "$TAG" release/* \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "${TAG}" \
+              --notes "$NOTES"
+          fi

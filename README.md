@@ -72,9 +72,31 @@ Config is stored under `~/.supercharge/`.
 
 ## Releases
 
-Binaries are published from GitHub Actions when a `v*` tag is pushed to the main Supercharge repo. Each release includes:
+**Builds run on this public repo** (unlimited GitHub Actions minutes). The private source repo only triggers the build — it does not compile binaries itself.
 
-- Cross-platform CLI binaries
+### One-time setup (repo owner)
+
+Add a GitHub PAT with `repo` read access to the private source:
+
+| Secret | Repository | Purpose |
+|--------|------------|---------|
+| `SUPERCHARGE_SOURCE_TOKEN` | `iotserver24/supercharge-releases` | Clone private source to build |
+| `SUPERCHARGE_RELEASES_TOKEN` | `iotserver24/supercharge` | Trigger public release from private tags |
+
+### Publish a release
+
+**From the private source repo** — push a tag:
+
+```bash
+git tag v1.0.5
+git push origin v1.0.5
+```
+
+**Or run manually** on this public repo: Actions → *Build and publish release* → set `tag` and `source_ref` (e.g. `v1.0.5`).
+
+Each release includes:
+
+- Cross-platform CLI binaries (Linux, macOS, Windows)
 - `install.sh` / `install.ps1`
 - `SHA256SUMS` checksums
 - Linux daemon binary (`superagent-server-linux-x86_64`) for self-hosted / E2B sandboxes
