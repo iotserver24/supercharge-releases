@@ -55,7 +55,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-24.04
+          - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             platform: linux-x86_64
             ext: ""
@@ -178,7 +178,7 @@ jobs:
   build-daemon:
     name: Daemon linux-x86_64
     if: ${{ github.event_name == 'repository_dispatch' && (github.event.client_payload.build_daemon != false) || github.event_name == 'workflow_dispatch' && inputs.build_daemon }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-22.04
     timeout-minutes: 90
     steps:
       - name: Check out private source
