@@ -55,8 +55,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-musl
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
             platform: linux-x86_64
             ext: ""
             rg_triple: x86_64-unknown-linux-musl
@@ -102,14 +102,9 @@ jobs:
       - name: Install native build prerequisites (Linux)
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends protobuf-compiler musl-tools
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends protobuf-compiler
           echo "PROTOC=$(command -v protoc)" >> "$GITHUB_ENV"
           rm -f source/bin/protoc
-          if [ "${{ matrix.target }}" = "x86_64-unknown-linux-musl" ]; then
-            sudo ln -sf "$(command -v musl-gcc)" /usr/local/bin/x86_64-linux-musl-gcc
-            echo "CC_x86_64_unknown_linux_musl=x86_64-linux-musl-gcc" >> "$GITHUB_ENV"
-          fi
 
       - name: Install native build prerequisites (macOS)
         if: runner.os == 'macOS'
