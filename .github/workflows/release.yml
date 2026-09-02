@@ -15,7 +15,7 @@ on:
       source_ref:
         description: Git ref to build from in the private source repo (tag, branch, or SHA)
         required: true
-        default: v1.0.5
+        default: main
         type: string
       source_repo:
         description: Private source repository (owner/name)
