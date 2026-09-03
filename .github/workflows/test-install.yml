@@ -60,10 +60,11 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           & .\scripts\install.ps1
-          $cmd = Get-Command supercharge -ErrorAction Stop
+          $cmd = Get-Command supercharge.exe -ErrorAction Stop
           Write-Host "Resolved: $($cmd.Source)"
-          & supercharge --version
-          & sc --version
+          & supercharge.exe --version
+          # `sc` is Set-Content in PowerShell; the CLI is sc.exe
+          & sc.exe --version
 
       - name: Install (Windows cmd)
         if: matrix.kind == 'cmd'
@@ -71,8 +72,9 @@ jobs:
         run: |
           powershell -NoProfile -ExecutionPolicy Bypass -File scripts\install.ps1
           if errorlevel 1 exit /b 1
-          "%USERPROFILE%\.local\bin\supercharge.exe" --version
+          set "PATH=%USERPROFILE%\.local\bin;%PATH%"
+          supercharge.exe --version
           if errorlevel 1 exit /b 1
-          "%USERPROFILE%\.local\bin\sc.exe" --version
+          sc.exe --version
           if errorlevel 1 exit /b 1
           where supercharge
