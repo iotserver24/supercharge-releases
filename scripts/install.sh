@@ -36,10 +36,12 @@ fi
 
 download_file() {
   local url="$1" output="$2"
+  echo "Downloading ${url}..." >&2
   if [ "$downloader" = "curl" ]; then
-    curl -fsSL -o "$output" "$url"
+    # --progress-bar works in piped/CI terminals; -f still fails on HTTP errors.
+    curl -fL --progress-bar -o "$output" "$url"
   else
-    wget -q -O "$output" "$url"
+    wget --progress=bar:force -O "$output" "$url"
   fi
 }
 

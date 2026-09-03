@@ -68,7 +68,7 @@ sc             # same binary
 supercharge --single "Explain this repo"
 ```
 
-Config is stored under `~/.supercharge/`.
+Config is stored under `~/.supercharge/`. The Windows installer adds `~\.local\bin` to your user PATH (current session included).
 
 ## Releases
 
