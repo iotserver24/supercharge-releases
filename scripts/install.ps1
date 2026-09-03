@@ -16,6 +16,12 @@ $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 $ProgressPreference = 'SilentlyContinue'
 
+# This script is Windows-only; check before referencing USERPROFILE (unset on macOS/Linux).
+if ($PSVersionTable.Platform -and $PSVersionTable.Platform -ne 'Win32NT') {
+    Write-Error "This installer is for Windows. On macOS/Linux use install.sh instead."
+    exit 1
+}
+
 if (-not $Version -and $env:SUPERCHARGE_VERSION) {
     $Version = $env:SUPERCHARGE_VERSION
 }
@@ -25,11 +31,6 @@ $Repo = if ($env:SUPERCHARGE_GITHUB_REPO) { $env:SUPERCHARGE_GITHUB_REPO } else 
 $BinDir = if ($env:SUPERCHARGE_BIN_DIR) { $env:SUPERCHARGE_BIN_DIR } else { Join-Path $env:USERPROFILE '.local\bin' }
 $ConfigHome = if ($env:SUPERCHARGE_HOME) { $env:SUPERCHARGE_HOME } else { Join-Path $env:USERPROFILE '.supercharge' }
 $DownloadDir = if ($env:SUPERCHARGE_DOWNLOAD_DIR) { $env:SUPERCHARGE_DOWNLOAD_DIR } else { Join-Path $ConfigHome 'downloads' }
-
-if ($PSVersionTable.Platform -and $PSVersionTable.Platform -ne 'Win32NT') {
-    Write-Error "This installer is for Windows. On macOS/Linux use install.sh instead."
-    exit 1
-}
 
 if ($Version -and $Version -notmatch '^\d+\.\d+\.\d+([.-]\S+)?$') {
     Write-Error "Invalid version format: $Version (expected X.Y.Z)"
@@ -77,10 +78,11 @@ $asset = "supercharge-$platform.exe"
 if (-not $Version) {
     Write-Host "Fetching latest release from $Repo..." -ForegroundColor DarkGray
     $latest = Download-String "https://api.github.com/repos/$Repo/releases/latest"
-    if ($latest -match '"tag_name"\s*:\s*"v?([^"]+)"') {
+    if ($latest -and $latest -match '"tag_name"\s*:\s*"v?([^"]+)"') {
         $Version = $Matches[1]
     } else {
-        $Version = (Download-String "https://github.com/$Repo/releases/latest/download/version").Trim()
+        $fallback = Download-String "https://github.com/$Repo/releases/latest/download/version"
+        if ($fallback) { $Version = $fallback.Trim() }
     }
 }
 
@@ -110,7 +112,7 @@ Copy-Item -Force $binaryPath (Join-Path $BinDir 'sc.exe')
 
 Write-Host @"
 
-Installed Supercharge AI $Version:
+Installed Supercharge AI ${Version}:
   $(Join-Path $BinDir 'supercharge.exe')
   $(Join-Path $BinDir 'sc.exe')
 

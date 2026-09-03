@@ -43,12 +43,13 @@ download_file() {
   fi
 }
 
+# Tolerate HTTP errors (e.g. GitHub API 403 rate limits) so callers can fall back.
 download_string() {
   local url="$1"
   if [ "$downloader" = "curl" ]; then
-    curl -fsSL "$url"
+    curl -fsSL "$url" 2>/dev/null || true
   else
-    wget -q -O - "$url"
+    wget -q -O - "$url" 2>/dev/null || true
   fi
 }
 
@@ -81,7 +82,8 @@ if [ -z "$TARGET" ]; then
   echo "Fetching latest release from ${REPO}..." >&2
   TARGET="$(download_string "https://api.github.com/repos/${REPO}/releases/latest" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"v\?\([^"]*\)".*/\1/p' | head -1)"
   if [ -z "$TARGET" ]; then
-    TARGET="$(download_string "https://github.com/${REPO}/releases/latest/download/version" 2>/dev/null | tr -d '[:space:]' || true)"
+    echo "GitHub API unavailable (rate limited or down); falling back to release asset." >&2
+    TARGET="$(download_string "https://github.com/${REPO}/releases/latest/download/version" | tr -d '[:space:]')"
   fi
 fi
 
