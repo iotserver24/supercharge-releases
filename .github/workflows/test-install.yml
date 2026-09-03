@@ -30,9 +30,6 @@ jobs:
           - name: macos-aarch64
             os: macos-latest
             kind: unix
-          - name: macos-x86_64
-            os: macos-13
-            kind: unix
           - name: windows-powershell
             os: windows-latest
             kind: pwsh
