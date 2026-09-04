@@ -15,8 +15,45 @@ param(
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
+function Write-Banner {
+    Write-Host ""
+    Write-Host "  Supercharge AI installer" -ForegroundColor Cyan
+    Write-Host "  ────────────────────────" -ForegroundColor DarkGray
+}
+
+function Write-Step([string]$N, [string]$Label, [string]$Detail = '') {
+    Write-Host -NoNewline "  " -ForegroundColor Cyan
+    Write-Host -NoNewline "$N/4  " -ForegroundColor Cyan
+    Write-Host -NoNewline $Label
+    if ($Detail) {
+        Write-Host "  $Detail" -ForegroundColor DarkGray
+    } else {
+        Write-Host ""
+    }
+}
+
+function Write-Ok([string]$Msg) {
+    Write-Host -NoNewline "       "
+    Write-Host -NoNewline "✓ " -ForegroundColor Green
+    Write-Host $Msg
+}
+
+function Write-Warn([string]$Msg) {
+    Write-Host -NoNewline "       "
+    Write-Host -NoNewline "! " -ForegroundColor Yellow
+    Write-Host $Msg
+}
+
+function Write-Fail([string]$Msg) {
+    Write-Host -NoNewline "       "
+    Write-Host -NoNewline "✗ " -ForegroundColor Red
+    Write-Host $Msg
+}
+
+Write-Banner
+
 if ($PSVersionTable.Platform -and $PSVersionTable.Platform -ne 'Win32NT') {
-    Write-Error "This installer is for Windows. On macOS/Linux use install.sh instead."
+    Write-Fail "This installer is for Windows. On macOS/Linux use install.sh instead."
     exit 1
 }
 
@@ -30,7 +67,7 @@ $BinDir = if ($env:SUPERCHARGE_BIN_DIR) { $env:SUPERCHARGE_BIN_DIR } else { Join
 $ConfigHome = if ($env:SUPERCHARGE_HOME) { $env:SUPERCHARGE_HOME } else { Join-Path $env:USERPROFILE '.supercharge' }
 
 if ($Version -and $Version -notmatch '^\d+\.\d+\.\d+([.-]\S+)?$') {
-    Write-Error "Invalid version format: $Version (expected X.Y.Z)"
+    Write-Fail "Invalid version format: $Version (expected X.Y.Z)"
     exit 1
 }
 
@@ -82,9 +119,7 @@ function Download-File([string]$Url, [string]$OutFile) {
         & curl.exe -fL --progress-bar -o $OutFile $Url
         if ($LASTEXITCODE -eq 0) { return }
 
-        # Windows Schannel often fails with CRYPT_E_REVOCATION_OFFLINE when the
-        # CRL/OCSP endpoint is blocked or unreachable. Retry without that check.
-        Write-Host "HTTPS certificate revocation check failed; retrying without it..." -ForegroundColor Yellow
+        Write-Warn "HTTPS certificate revocation check failed; retrying without it..."
         & curl.exe -fL --ssl-no-revoke --progress-bar -o $OutFile $Url
         if ($LASTEXITCODE -eq 0) { return }
     }
@@ -117,10 +152,11 @@ function Add-UserPath([string]$Dir) {
             break
         }
     }
+    $result = 'already'
     if (-not $already) {
         $joined = if ($parts.Count -gt 0) { ($parts + $Dir) -join ';' } else { $Dir }
         [Environment]::SetEnvironmentVariable('Path', $joined, 'User')
-        Write-Host "Added $Dir to your user PATH." -ForegroundColor DarkGray
+        $result = 'added'
     }
     $sessionParts = @($env:Path -split ';' | Where-Object { $_ })
     $inSession = $false
@@ -132,14 +168,16 @@ function Add-UserPath([string]$Dir) {
     }
     if (-not $inSession) {
         $env:Path = "$Dir;$env:Path"
+        if ($result -ne 'added') { $result = 'session' }
     }
+    return $result
 }
 
 $arch = switch ($env:PROCESSOR_ARCHITECTURE) {
     'AMD64' { 'x86_64' }
     'ARM64' { 'aarch64' }
     default {
-        Write-Error "Unsupported architecture: $($env:PROCESSOR_ARCHITECTURE)"
+        Write-Fail "Unsupported architecture: $($env:PROCESSOR_ARCHITECTURE)"
         exit 1
     }
 }
@@ -147,62 +185,82 @@ $arch = switch ($env:PROCESSOR_ARCHITECTURE) {
 $platform = "windows-$arch"
 $asset = "supercharge-$platform.exe"
 
+Write-Step '1' 'Version'
 if (-not $Version) {
-    Write-Host "Fetching latest release from $Repo..." -ForegroundColor DarkGray
     $latest = Download-String "https://api.github.com/repos/$Repo/releases/latest"
     if ($latest -and $latest -match '"tag_name"\s*:\s*"v?([^"]+)"') {
         $Version = $Matches[1]
     } else {
+        Write-Warn "GitHub API unavailable; falling back to release asset."
         $fallback = Download-String "https://github.com/$Repo/releases/latest/download/version"
         if ($fallback) { $Version = $fallback.Trim() }
     }
 }
 
 if (-not $Version) {
-    Write-Error "Failed to resolve latest version from $Repo"
+    Write-Fail "Failed to resolve latest version from $Repo"
     exit 1
 }
+Write-Ok "$Version  ($platform)"
 
 $tag = "v$($Version -replace '^v','')"
 $baseUrl = "https://github.com/$Repo/releases/download/$tag"
 $exe = Join-Path $BinDir 'supercharge.exe'
 $tmp = Join-Path $env:TEMP "supercharge-$Version-$platform.exe.tmp"
 
-New-Item -ItemType Directory -Force -Path $BinDir, $ConfigHome | Out-Null
+try {
+    New-Item -ItemType Directory -Force -Path $BinDir, $ConfigHome | Out-Null
+} catch {
+    Write-Fail "Cannot create install directories (permission denied?)."
+    Write-Host "         $BinDir" -ForegroundColor DarkGray
+    Write-Host "         $ConfigHome" -ForegroundColor DarkGray
+    Write-Host "         $($_.Exception.Message)" -ForegroundColor DarkGray
+    exit 1
+}
 
-Write-Host "Downloading Supercharge $Version ($platform)..." -ForegroundColor Cyan
+Write-Step '2' 'Download' $asset
 try {
     Download-File "$baseUrl/$asset" $tmp
 } catch {
     Remove-Item -Force -ErrorAction SilentlyContinue $tmp
-    Write-Error @"
-Download failed for $baseUrl/$asset
-
-$($_.Exception.Message)
-
-If you saw CRYPT_E_REVOCATION_OFFLINE / schannel, Windows could not reach the
-certificate revocation server (firewall, proxy, or offline OCSP). Try another
-network, or download the file in a browser from:
-  $baseUrl/$asset
-"@
+    Write-Fail "Download failed"
+    Write-Host "         $baseUrl/$asset" -ForegroundColor DarkGray
+    Write-Host "         $($_.Exception.Message)" -ForegroundColor DarkGray
+    Write-Host "         If CRYPT_E_REVOCATION_OFFLINE / schannel: try another network, or download in a browser." -ForegroundColor DarkGray
+    Write-Host "         If Access denied: antivirus or folder ACLs; avoid installing as a different admin user." -ForegroundColor DarkGray
     exit 1
 }
+Write-Ok 'saved'
 
-Move-Item -Force $tmp $exe
-Copy-Item -Force $exe (Join-Path $BinDir 'sc.exe')
-Add-UserPath $BinDir
+Write-Step '3' 'Install' $BinDir
+try {
+    Move-Item -Force $tmp $exe
+    Copy-Item -Force $exe (Join-Path $BinDir 'sc.exe')
+} catch {
+    Remove-Item -Force -ErrorAction SilentlyContinue $tmp
+    Write-Fail "Cannot write to $BinDir (permission denied?)."
+    Write-Host "         $($_.Exception.Message)" -ForegroundColor DarkGray
+    Write-Host "         If this folder is owned by Administrators, take ownership or pick another SUPERCHARGE_BIN_DIR." -ForegroundColor DarkGray
+    exit 1
+}
+Write-Ok $exe
+Write-Ok (Join-Path $BinDir 'sc.exe')
 
-Write-Host @"
+Write-Step '4' 'PATH'
+$pathState = Add-UserPath $BinDir
+switch ($pathState) {
+    'added' { Write-Ok "added $BinDir to user PATH" }
+    'session' { Write-Ok "on PATH in this session (user PATH already had it)" }
+    default { Write-Ok 'already on PATH' }
+}
 
-Installed Supercharge AI ${Version}:
-  $exe
-  $(Join-Path $BinDir 'sc.exe')
-
-Configuration home:
-  $ConfigHome
-
-This terminal can run it now. New terminals will pick up PATH automatically.
-
-  supercharge
-  sc
-"@
+Write-Host ""
+Write-Host "  Installed Supercharge AI $Version" -ForegroundColor Green
+Write-Host "  Config: $ConfigHome" -ForegroundColor DarkGray
+Write-Host ""
+Write-Host "  Start:"
+Write-Host "    supercharge"
+Write-Host "    sc"
+Write-Host ""
+Write-Host "  This terminal can run it now. New terminals pick up PATH automatically." -ForegroundColor DarkGray
+Write-Host ""
