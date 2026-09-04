@@ -46,16 +46,7 @@ function Download-String([string]$Url) {
     }
 }
 
-function Download-File([string]$Url, [string]$OutFile) {
-    $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
-    if ($curl) {
-        & curl.exe -fL --progress-bar -o $OutFile $Url
-        if ($LASTEXITCODE -ne 0) {
-            throw "curl exited with $LASTEXITCODE"
-        }
-        return
-    }
-
+function Download-FileNet([string]$Url, [string]$OutFile) {
     $request = [System.Net.HttpWebRequest]::Create($Url)
     $request.Timeout = 300000
     $request.AllowAutoRedirect = $true
@@ -82,6 +73,36 @@ function Download-File([string]$Url, [string]$OutFile) {
         $fileStream.Close()
         $stream.Close()
         $response.Close()
+    }
+}
+
+function Download-File([string]$Url, [string]$OutFile) {
+    $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
+    if ($curl) {
+        & curl.exe -fL --progress-bar -o $OutFile $Url
+        if ($LASTEXITCODE -eq 0) { return }
+
+        # Windows Schannel often fails with CRYPT_E_REVOCATION_OFFLINE when the
+        # CRL/OCSP endpoint is blocked or unreachable. Retry without that check.
+        Write-Host "HTTPS certificate revocation check failed; retrying without it..." -ForegroundColor Yellow
+        & curl.exe -fL --ssl-no-revoke --progress-bar -o $OutFile $Url
+        if ($LASTEXITCODE -eq 0) { return }
+    }
+
+    try {
+        Download-FileNet $Url $OutFile
+        return
+    } catch {
+        $prevCrl = [Net.ServicePointManager]::CheckCertificateRevocationList
+        try {
+            [Net.ServicePointManager]::CheckCertificateRevocationList = $false
+            Download-FileNet $Url $OutFile
+            return
+        } catch {
+            throw
+        } finally {
+            [Net.ServicePointManager]::CheckCertificateRevocationList = $prevCrl
+        }
     }
 }
 
@@ -154,7 +175,16 @@ try {
     Download-File "$baseUrl/$asset" $tmp
 } catch {
     Remove-Item -Force -ErrorAction SilentlyContinue $tmp
-    Write-Error "Download failed for $baseUrl/$asset. This platform may not be published yet."
+    Write-Error @"
+Download failed for $baseUrl/$asset
+
+$($_.Exception.Message)
+
+If you saw CRYPT_E_REVOCATION_OFFLINE / schannel, Windows could not reach the
+certificate revocation server (firewall, proxy, or offline OCSP). Try another
+network, or download the file in a browser from:
+  $baseUrl/$asset
+"@
     exit 1
 }
 
