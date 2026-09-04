@@ -18,7 +18,7 @@ $ErrorActionPreference = 'Stop'
 function Write-Banner {
     Write-Host ""
     Write-Host "  Supercharge AI installer" -ForegroundColor Cyan
-    Write-Host "  ────────────────────────" -ForegroundColor DarkGray
+    Write-Host "  ------------------------" -ForegroundColor DarkGray
 }
 
 function Write-Step([string]$N, [string]$Label, [string]$Detail = '') {
@@ -34,7 +34,7 @@ function Write-Step([string]$N, [string]$Label, [string]$Detail = '') {
 
 function Write-Ok([string]$Msg) {
     Write-Host -NoNewline "       "
-    Write-Host -NoNewline "✓ " -ForegroundColor Green
+    Write-Host -NoNewline "+ " -ForegroundColor Green
     Write-Host $Msg
 }
 
@@ -46,7 +46,7 @@ function Write-Warn([string]$Msg) {
 
 function Write-Fail([string]$Msg) {
     Write-Host -NoNewline "       "
-    Write-Host -NoNewline "✗ " -ForegroundColor Red
+    Write-Host -NoNewline "x " -ForegroundColor Red
     Write-Host $Msg
 }
 
@@ -167,7 +167,7 @@ function Add-UserPath([string]$Dir) {
         }
     }
     if (-not $inSession) {
-        $env:Path = "$Dir;$env:Path"
+        $env:Path = "$Dir;${env:Path}"
         if ($result -ne 'added') { $result = 'session' }
     }
     return $result
@@ -177,7 +177,7 @@ $arch = switch ($env:PROCESSOR_ARCHITECTURE) {
     'AMD64' { 'x86_64' }
     'ARM64' { 'aarch64' }
     default {
-        Write-Fail "Unsupported architecture: $($env:PROCESSOR_ARCHITECTURE)"
+        Write-Fail "Unsupported architecture: ${env:PROCESSOR_ARCHITECTURE}"
         exit 1
     }
 }
