@@ -216,8 +216,9 @@ jobs:
       - name: Package daemon artifact
         run: |
           mkdir -p dist
-          cp source/target/release/supercharge-superagent-server dist/superagent-server-linux-x86_64
-          chmod +x dist/superagent-server-linux-x86_64
+          cp source/target/release/supercharge-superagent-server dist/supercharge-superagent-server-linux-x86_64
+          cp dist/supercharge-superagent-server-linux-x86_64 dist/superagent-server-linux-x86_64
+          chmod +x dist/*
 
       - uses: actions/upload-artifact@v4
         with:
@@ -274,7 +275,7 @@ jobs:
             tar -C source/sandbox -czf release/superagent-e2b-template-source.tar.gz e2b-agent-template
           fi
           cat > release/e2b-manifest.json <<EOF
-          {"version":"${TAG}","daemon":"superagent-server-linux-x86_64","cli":"supercharge-linux-x86_64"}
+          {"version":"${TAG}","daemon":"supercharge-superagent-server-linux-x86_64","cli":"supercharge-linux-x86_64"}
           EOF
           sha256sum release/* > release/SHA256SUMS
           ls -la release/
