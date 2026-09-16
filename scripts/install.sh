@@ -100,14 +100,31 @@ download_string() {
 # Quote literal paths, not shell expressions. fish has different single-quote
 # escaping rules; neither form evaluates $, backticks, or command substitutions.
 quote_path() {
-  local value="$1"
-  if [ "${2:-}" = fish ]; then
-    value="${value//\\/\\\\}"
-    value="${value//\'/\\\'}"
-    printf "'%s'" "$value"
-  else
-    printf "'%s'" "${value//\'/\'\\\'\'}"
-  fi
+  local value="$1" char
+  # Avoid quote-sensitive pattern substitutions: Bash 3.2 parses them differently.
+  printf '%s' "'"
+  while [ -n "$value" ]; do
+    char="${value:0:1}"
+    value="${value:1}"
+    case "$char" in
+      "'")
+        if [ "${2:-}" = fish ]; then
+          printf '%s' "\\'"
+        else
+          printf '%s' "'\\''"
+        fi
+        ;;
+      '\')
+        if [ "${2:-}" = fish ]; then
+          printf '%s' '\\'
+        else
+          printf '%s' "$char"
+        fi
+        ;;
+      *) printf '%s' "$char" ;;
+    esac
+  done
+  printf '%s' "'"
 }
 
 path_block() {

@@ -19,7 +19,9 @@ class InstallerTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="supercharge-install-test-")
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        # macOS /var is an alias for /private/var; the installer uses pwd -P.
+        # Keep exact PATH-entry comparisons, but build expectations physically.
+        self.root = Path(self.temp.name).resolve()
         self.home = self.root / "home"
         self.home.mkdir()
         self.mock = self.root / "mock"
@@ -65,6 +67,7 @@ printf '%s\\n' '#!/bin/sh' '[ "$1" = --version ] || exit 92' 'printf "supercharg
         result = subprocess.run([BASH, "-s", "1.2.3"], input=INSTALLER.read_text(),
                                 cwd=self.home, env=self.env, text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.bin = self.bin.resolve(strict=True)
         self.assertEqual(subprocess.check_output([str(self.bin / "supercharge"), "--version"], text=True).strip(), "supercharge 1.2.3")
         return result.stderr
 
@@ -149,6 +152,17 @@ printf '%s\\n' '#!/bin/sh' '[ "$1" = --version ] || exit 92' 'printf "supercharg
         self.run_install(SUPERCHARGE_BIN_DIR="relative bin")
         self.shell_path(BASH, [self.home / ".bashrc"])
 
+    def test_symlinked_install_directory_uses_physical_path(self):
+        physical = self.home / "physical bin"
+        physical.mkdir()
+        alias = self.home / "alias bin"
+        alias.symlink_to(physical, target_is_directory=True)
+        output = self.run_install(SUPERCHARGE_BIN_DIR=alias)
+        self.assertEqual(self.bin, physical)
+        entries = self.shell_path(BASH, [self.home / ".bashrc"])
+        self.assertNotIn(str(alias), entries)
+        self.assertIn(str(physical / "supercharge"), output)
+
     def test_immediate_user_path_links(self):
         userbin = self.home / "existing bin"
         userbin.mkdir()
@@ -213,10 +227,16 @@ printf '%s\\n' '#!/bin/sh' '[ "$1" = --version ] || exit 92' 'printf "supercharg
     @unittest.skipUnless(FISH, "fish not installed")
     def test_fish_respects_xdg_config_and_quotes(self):
         config = self.home / "fish config"
-        self.run_install(SHELL=FISH, XDG_CONFIG_HOME=config, SUPERCHARGE_BIN_DIR=self.home / "bin ' $HOME ` \\ [*]")
+        output = self.run_install(SHELL=FISH, XDG_CONFIG_HOME=config,
+                                  SUPERCHARGE_BIN_DIR=self.home / "bin '' $HOME ` \\ [*] (touch INJECTED) \\'")
         rc = config / "fish/config.fish"
         self.assertFalse((self.home / ".bashrc").exists())
         self.shell_path(FISH, [rc])
+        command = next(line.strip() for line in output.splitlines() if line.strip().startswith("set -gx PATH "))
+        result = subprocess.run([FISH, "-c", command + '; supercharge --version'],
+                                env=self.env, cwd=self.home, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((self.home / "INJECTED").exists())
         before = rc.read_text()
         self.run_install()
         self.assertEqual(rc.read_text(), before)
