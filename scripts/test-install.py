@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Offline installer regression tests. All shell state lives in temporary homes."""
+import json
 import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -38,20 +40,99 @@ class InstallerTests(unittest.TestCase):
             "MOCK_PLATFORM": "Linux", "MOCK_ARCH": "x86_64",
         }
         self.write(self.mock / "uname", '#!/bin/sh\ncase "$1" in -s) printf "%s\\n" "$MOCK_PLATFORM";; -m) printf "%s\\n" "$MOCK_ARCH";; esac\n', True)
-        # No network access: every curl request must be an expected asset request.
-        self.write(self.mock / "curl", '''#!/bin/sh
-output=
-while [ "$#" -gt 0 ]; do
-  case "$1" in
-    -o) output="$2"; shift 2 ;;
-    https://github.com/*/releases/download/v1.2.3/supercharge-*) shift ;;
-    -fL|--progress-bar) shift ;;
-    *) printf 'Unexpected mock curl argument: %s\\n' "$1" >&2; exit 90 ;;
-  esac
-done
-[ -n "$output" ] || exit 91
-printf '%s\\n' '#!/bin/sh' '[ "$1" = --version ] || exit 92' 'printf "supercharge 1.2.3\\n"' > "$output"
+        # Both clients are mocked, including fallback: never reach real networking.
+        self.env["MOCK_ROOT"] = str(self.root)
+        for client in ("curl", "wget"):
+            # Some embedded test runners report their host app as sys.executable.
+            python = shutil.which("python3", path=os.defpath) or sys.executable
+            self.write(self.mock / client, f"#!{python}\n" + r'''
+import json
+import os
+from pathlib import Path
+import sys
+
+client = Path(sys.argv[0]).name
+root = Path(os.environ["MOCK_ROOT"])
+args = sys.argv[1:]
+log = root / (client + ".jsonl")
+calls = len(log.read_text().splitlines()) if log.exists() else 0
+with log.open("a") as f:
+    f.write(json.dumps(args) + "\n")
+output = None
+url = None
+allowed_flags = {"-q", "-fL", "--progress-bar", "--http1.1", "--check-certificate",
+                 "--progress=bar:force", "--server-response", "--max-redirect=0", "--tries=1",
+                 "--connect-timeout=30", "--dns-timeout=30", "--read-timeout=120"}
+allowed_values = {"--proto": "=https", "--proto-redir": "=https",
+                  "--connect-timeout": "30", "--max-time": "1800", "--write-out": "%{http_code}"}
+while args:
+    arg = args.pop(0)
+    if arg in ("-o", "-O"):
+        output = Path(args.pop(0))
+    elif arg in allowed_flags:
+        pass
+    elif arg in allowed_values:
+        assert args.pop(0) == allowed_values[arg], arg
+    elif arg.startswith("https://github.com/") and "/releases/download/v1.2.3/supercharge-" in arg:
+        url = arg
+    elif arg == "https://release-assets.githubusercontent.com/test-asset":
+        url = arg
+    else:
+        raise AssertionError("Unexpected mock argument: " + arg)
+assert output and url
+assert not output.exists(), "Each attempt must discard earlier partial bytes"
+plan_file = root / (client + "-plan.json")
+plan = json.loads(plan_file.read_text()) if plan_file.exists() else [{}]
+assert calls < len(plan) or not plan_file.exists(), "Unexpected extra download attempt"
+entry = plan[calls] if plan_file.exists() else {}
+code = entry.get("code", 0)
+status = entry.get("status", "000" if code else "200")
+body = entry.get("body", "partial bytes" if code else '#!/bin/sh\n[ "$1" = --version ] || exit 92\nprintf "supercharge 1.2.3\\n"\n')
+output.write_text(body)
+if client == "curl":
+    assert sys.argv[1] == "-q", "Disable curlrc before all other options"
+    assert "--proto-redir" in sys.argv and "--max-time" in sys.argv
+    print(status, end="")
+else:
+    assert "--check-certificate" in sys.argv and "--max-redirect=0" in sys.argv
+    if status != "000":
+        print("  HTTP/1.1 " + status + " Mock", file=sys.stderr)
+    if "location" in entry:
+        print("  Location: " + entry["location"], file=sys.stderr)
+if code:
+    print(entry.get("reason", "mock transport failure"), file=sys.stderr)
+sys.exit(code)
 ''', True)
+        self.write(self.mock / "sleep", "#!/bin/sh\nexit 0\n", True)
+
+    def download_plan(self, client, entries):
+        self.write(self.root / (client + "-plan.json"), json.dumps(entries))
+
+    def download_calls(self, client):
+        path = self.root / (client + ".jsonl")
+        return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+    def fail_install(self):
+        old = "#!/bin/sh\nprintf 'old executable\\n'\n"
+        self.write(self.bin / "supercharge", old, True)
+        self.write(self.bin / "sc", old, True)
+        result = subprocess.run([BASH, str(INSTALLER), "1.2.3"], cwd=self.home,
+                                env=self.env, text=True, capture_output=True, timeout=30)
+        self.assertNotEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.bin / "supercharge").read_text(), old)
+        self.assertEqual((self.bin / "sc").read_text(), old)
+        self.assertEqual(list((self.home / ".supercharge/downloads").iterdir()), [])
+        self.assertFalse((self.home / ".bashrc").exists())
+        self.assertNotIn("Installed Supercharge", result.stderr)
+        return result.stderr
+
+    def wget_only(self):
+        # Isolated PATH hides system curl, while retaining ordinary shell utilities.
+        (self.mock / "curl").unlink()
+        for utility in ("awk", "rm", "mkdir", "chmod", "mv", "install", "ln", "cp", "bash"):
+            (self.mock / utility).symlink_to(shutil.which(utility))
+        self.env["PATH"] = str(self.mock)
+        self.env["SUPERCHARGE_NO_MODIFY_PATH"] = "1"
 
     def write(self, path, content, executable=False):
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -85,6 +166,106 @@ printf '%s\\n' '#!/bin/sh' '[ "$1" = --version ] || exit 92' 'printf "supercharg
         entries = result.stdout.splitlines() if shell == FISH else result.stdout.split(":")
         self.assertEqual(entries.count(str(self.bin)), 1, entries)
         return entries
+
+    def test_reset_then_success(self):
+        self.download_plan("curl", [{"code": 35, "reason": "Recv failure: Connection reset by peer"}, {}])
+        output = self.run_install()
+        self.assertIn("curl exit 35", output)
+        self.assertEqual(len(self.download_calls("curl")), 2)
+        self.assertEqual(self.download_calls("wget"), [])
+
+    def test_http1_fallback_after_three_resets(self):
+        self.download_plan("curl", [{"code": 35}] * 3 + [{}])
+        self.run_install()
+        calls = self.download_calls("curl")
+        self.assertEqual(len(calls), 4)
+        self.assertTrue(all("--http1.1" not in call for call in calls[:3]))
+        self.assertIn("--http1.1", calls[3])
+        self.assertEqual(self.download_calls("wget"), [])
+
+    def test_wget_fallback_after_curl_transport_exhaustion(self):
+        self.download_plan("curl", [{"code": 56}] * 6)
+        self.download_plan("wget", [{"code": 4}, {}])
+        self.run_install()
+        self.assertEqual(len(self.download_calls("curl")), 6)
+        self.assertEqual(len(self.download_calls("wget")), 2)
+
+    def test_http_errors_not_retried_or_misdiagnosed(self):
+        for status, message in (("404", "asset not found"), ("401", "authentication required"),
+                                ("403", "access denied")):
+            with self.subTest(status=status):
+                (self.root / "curl.jsonl").unlink(missing_ok=True)
+                self.download_plan("curl", [{"code": 22, "status": status}])
+                output = self.fail_install()
+                self.assertIn("HTTP " + status, output)
+                self.assertIn(message, output)
+                self.assertIn("curl exit 22", output)
+                self.assertEqual(len(self.download_calls("curl")), 1)
+                self.assertEqual(self.download_calls("wget"), [])
+
+    def test_rate_limit_retries_are_bounded_without_client_fallback(self):
+        self.download_plan("curl", [{"code": 22, "status": "429"}] * 3)
+        output = self.fail_install()
+        self.assertIn("HTTP 429: rate limited", output)
+        self.assertEqual(len(self.download_calls("curl")), 3)
+        self.assertEqual(self.download_calls("wget"), [])
+
+    def test_server_error_retry_then_success(self):
+        self.download_plan("curl", [{"code": 22, "status": "503"}, {}])
+        self.run_install()
+        self.assertEqual(len(self.download_calls("curl")), 2)
+
+    def test_certificate_and_disk_errors_do_not_fallback(self):
+        for code, message in ((60, "certificate verification failed"), (23, "Local file read/write failure")):
+            with self.subTest(code=code):
+                (self.root / "curl.jsonl").unlink(missing_ok=True)
+                self.download_plan("curl", [{"code": code}])
+                output = self.fail_install()
+                self.assertIn(message, output)
+                self.assertEqual(len(self.download_calls("curl")), 1)
+                self.assertEqual(self.download_calls("wget"), [])
+
+    def test_exhausted_transports_preserve_installed_executable(self):
+        self.download_plan("curl", [{"code": 35}] * 6)
+        self.download_plan("wget", [{"code": 4}] * 3)
+        output = self.fail_install()
+        self.assertIn("curl exit 35", output)
+        self.assertIn("wget exit 4", output)
+        self.assertNotIn("platform may not be published", output)
+        self.assertNotIn("asset not found", output)
+        self.assertEqual(len(self.download_calls("curl")), 6)
+        self.assertEqual(len(self.download_calls("wget")), 3)
+
+    def test_invalid_success_body_is_not_installed(self):
+        self.download_plan("curl", [{"body": "#!/bin/sh\nexit 1\n"}])
+        output = self.fail_install()
+        self.assertIn("Downloaded binary failed to run", output)
+        self.assertNotIn("Download failed", output)
+        self.assertEqual(len(self.download_calls("curl")), 1)
+        self.assertEqual(self.download_calls("wget"), [])
+
+    def test_wget_only_retries_and_follows_verified_https_redirect(self):
+        self.wget_only()
+        self.download_plan("wget", [{"code": 4}, {"code": 8, "status": "302",
+                            "location": "https://release-assets.githubusercontent.com/test-asset"}, {}])
+        self.run_install()
+        self.assertEqual(len(self.download_calls("wget")), 3)
+        self.assertEqual(self.download_calls("curl"), [])
+
+    def test_wget_only_rejects_http_redirect(self):
+        self.wget_only()
+        self.download_plan("wget", [{"code": 8, "status": "302", "location": "http://example.com/asset"}])
+        output = self.fail_install()
+        self.assertIn("refusing non-HTTPS", output)
+        self.assertEqual(len(self.download_calls("wget")), 1)
+
+    def test_wget_only_404_no_retry(self):
+        self.wget_only()
+        self.download_plan("wget", [{"code": 8, "status": "404"}])
+        output = self.fail_install()
+        self.assertIn("HTTP 404: release asset not found", output)
+        self.assertIn("wget exit 8", output)
+        self.assertEqual(len(self.download_calls("wget")), 1)
 
     def test_bash_pipe_install_and_idempotence(self):
         rc = self.home / ".bashrc"

@@ -79,13 +79,144 @@ else
   die "Either curl or wget is required."
 fi
 
+# Manual retries work with older curl (including macOS), without --retry-all-errors.
+# Always restart the staged file: resuming across redirects/releases can mix bytes.
+DOWNLOAD_ERROR=""
+http_download_error() {
+  case "$1" in
+    404) DOWNLOAD_ERROR="HTTP 404: release asset not found (or repository is private). Check the version and platform." ;;
+    401) DOWNLOAD_ERROR="HTTP 401: authentication required; this release is not publicly accessible." ;;
+    403) DOWNLOAD_ERROR="HTTP 403: access denied by GitHub or a proxy (possibly rate limited). Check access and any rate-limit response above." ;;
+    429) DOWNLOAD_ERROR="HTTP 429: rate limited. Wait before trying again." ;;
+    *) DOWNLOAD_ERROR="HTTP $1: server rejected the download." ;;
+  esac
+}
+
+retryable_http_status() {
+  case "$1" in 408|429|500|502|503|504) return 0 ;; *) return 1 ;; esac
+}
+
+# wget's --https-only does not protect non-recursive redirects. Follow redirects
+# ourselves so every requested URL is HTTPS, with certificate verification on.
+wget_download_attempt() {
+  local url="$1" output="$2" headers="${2}.wget-log" redirects=0 rc status location line origin
+  WGET_STATUS=""
+  while :; do
+    case "$url" in
+      https://*) ;;
+      *) DOWNLOAD_ERROR="Refusing a non-HTTPS wget redirect."; return 1 ;;
+    esac
+    rm -f "$output"
+    if wget --check-certificate --progress=bar:force --server-response --max-redirect=0 --tries=1 \
+      --connect-timeout=30 --dns-timeout=30 --read-timeout=120 -O "$output" "$url" 2>"$headers"; then
+      rc=0
+    else
+      rc=$?
+    fi
+    # Include native diagnostics, but keep status parsing independent of locale.
+    while IFS= read -r line; do say "$line"; done < "$headers"
+    status="$(awk '$1 ~ /^HTTP\// { code=$2 } END { print code }' "$headers")"
+    location="$(awk 'tolower($1) == "location:" { value=$2 } END { sub(/\r$/, "", value); print value }' "$headers")"
+    rm -f "$headers"
+    WGET_STATUS="$status"
+    case "$status" in
+      301|302|303|307|308)
+        if [ -z "$location" ] || [ "$redirects" -ge 10 ]; then
+          DOWNLOAD_ERROR="wget exit $rc: missing redirect location or too many redirects."
+          return 1
+        fi
+        case "$location" in
+          https://*) url="$location" ;;
+          //*) url="https:$location" ;;
+          /*) origin="${url#https://}"; url="https://${origin%%/*}$location" ;;
+          *) DOWNLOAD_ERROR="wget: refusing non-HTTPS or unsupported relative redirect."; return 1 ;;
+        esac
+        redirects=$((redirects + 1))
+        ;;
+      *) return "$rc" ;;
+    esac
+  done
+}
+
 download_file() {
-  local url="$1" output="$2"
-  if [ "$downloader" = "curl" ]; then
-    curl -fL --progress-bar -o "$output" "$url"
-  else
-    wget --progress=bar:force -O "$output" "$url"
+  local url="$1" output="$2" attempt rc status mode retry_kind curl_error=""
+  local -a protocol_args
+  DOWNLOAD_ERROR=""
+  if [ "$downloader" = curl ]; then
+    for mode in default http1; do
+      protocol_args=()
+      [ "$mode" = default ] || protocol_args=(--http1.1)
+      attempt=1
+      while :; do
+        rm -f "$output"
+        if status="$(curl -q -fL --progress-bar --proto '=https' --proto-redir '=https' \
+          --connect-timeout 30 --max-time 1800 --write-out '%{http_code}' \
+          ${protocol_args[@]+"${protocol_args[@]}"} -o "$output" "$url")"; then
+          return 0
+        else
+          rc=$?
+        fi
+        retry_kind=""
+        if [ "$rc" = 22 ]; then
+          http_download_error "$status"
+          if retryable_http_status "$status"; then retry_kind=http; fi
+        else
+          case "$rc" in
+            5|6|7|16|18|28|35|52|55|56|92|95)
+              DOWNLOAD_ERROR="Network/TLS/protocol download failure (curl exit $rc; HTTP ${status:-000})."
+              retry_kind=network ;;
+            51|60|77|83|90|91)
+              DOWNLOAD_ERROR="TLS certificate verification failed (curl exit $rc). Check the system CA certificates, clock, and HTTPS proxy; verification was not disabled." ;;
+            23|26) DOWNLOAD_ERROR="Local file read/write failure (curl exit $rc). Check disk space and permissions." ;;
+            *) DOWNLOAD_ERROR="Download failed (curl exit $rc; HTTP ${status:-000}); see curl diagnostics above." ;;
+          esac
+        fi
+        # Keep the client exit code even for HTTP errors.
+        if [ "$rc" = 22 ]; then DOWNLOAD_ERROR="$DOWNLOAD_ERROR (curl exit $rc)"; fi
+        warn "$DOWNLOAD_ERROR"
+        [ -n "$retry_kind" ] || return 1
+        [ "$attempt" -lt 3 ] || break
+        warn "Retrying download in $attempt seconds (attempt $((attempt + 1))/3, curl $mode)."
+        sleep "$attempt"
+        attempt=$((attempt + 1))
+      done
+      # Changing HTTP clients/protocols will not fix an HTTP rejection.
+      [ "$retry_kind" = network ] || return 1
+      if [ "$mode" = default ]; then
+        warn "Retrying with curl HTTP/1.1 after repeated transport failures."
+      fi
+    done
+    curl_error="$DOWNLOAD_ERROR"
+    command -v wget >/dev/null 2>&1 || return 1
+    warn "curl transport attempts exhausted; trying wget over verified HTTPS."
   fi
+
+  attempt=1
+  while :; do
+    rm -f "$output"
+    DOWNLOAD_ERROR=""
+    if wget_download_attempt "$url" "$output"; then return 0; else rc=$?; fi
+    retry_kind=""
+    if [ -z "$DOWNLOAD_ERROR" ]; then
+      if [[ "$WGET_STATUS" = [45][0-9][0-9] ]]; then
+        http_download_error "$WGET_STATUS"
+        if retryable_http_status "$WGET_STATUS"; then retry_kind=http; fi
+      else
+        case "$rc" in
+          4) DOWNLOAD_ERROR="Network download failure."; retry_kind=network ;;
+          5) DOWNLOAD_ERROR="TLS certificate verification failed; verification was not disabled." ;;
+          3) DOWNLOAD_ERROR="Local file read/write failure. Check disk space and permissions." ;;
+          *) DOWNLOAD_ERROR="Download failed; see wget diagnostics above." ;;
+        esac
+      fi
+    fi
+    DOWNLOAD_ERROR="${curl_error:+$curl_error }$DOWNLOAD_ERROR (wget exit $rc)"
+    warn "$DOWNLOAD_ERROR"
+    [ -n "$retry_kind" ] && [ "$attempt" -lt 3 ] || return 1
+    warn "Retrying download in $attempt seconds (attempt $((attempt + 1))/3, wget)."
+    sleep "$attempt"
+    attempt=$((attempt + 1))
+  done
 }
 
 download_string() {
@@ -338,7 +469,7 @@ binary_tmp="${binary_path}.tmp.$$"
 step 2 "Download" "${asset}"
 if ! download_file "${base_url}/${asset}" "$binary_tmp"; then
   rm -f "$binary_tmp"
-  die "Download failed" "${base_url}/${asset}" "This platform may not be published yet: https://github.com/${REPO}/releases/tag/${tag}"
+  die "Download failed" "${base_url}/${asset}" "$DOWNLOAD_ERROR"
 fi
 ok "saved"
 
