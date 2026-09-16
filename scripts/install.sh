@@ -97,6 +97,169 @@ download_string() {
   fi
 }
 
+# Quote literal paths, not shell expressions. fish has different single-quote
+# escaping rules; neither form evaluates $, backticks, or command substitutions.
+quote_path() {
+  local value="$1"
+  if [ "${2:-}" = fish ]; then
+    value="${value//\\/\\\\}"
+    value="${value//\'/\\\'}"
+    printf "'%s'" "$value"
+  else
+    printf "'%s'" "${value//\'/\'\\\'\'}"
+  fi
+}
+
+path_block() {
+  local quoted
+  quoted="$(quote_path "$BIN_DIR" "$shell_name")"
+  printf '%s\n' '# >>> Supercharge AI PATH >>>'
+  if [ "$shell_name" = fish ]; then
+    printf 'if not contains -- %s $PATH\n    set -gx PATH %s $PATH\nend\n' "$quoted" "$quoted"
+  else
+    printf 'case ":${PATH-}:" in\n  *:%s:*) ;;\n  *) export PATH=%s"${PATH:+:$PATH}" ;;\nesac\n' "$quoted" "$quoted"
+  fi
+  printf '%s\n' '# <<< Supercharge AI PATH <<<'
+}
+
+# Replace only our marked block, keeping all other content. Refuse malformed
+# markers and symlinks rather than risking damage to hand-managed dotfiles.
+update_shell_config() {
+  local rc="$1" parent tmp block backup
+  parent="${rc%/*}"
+  if [[ "$rc" != /* ]] || [ -L "$rc" ] ||
+    { [ -e "$rc" ] && { [ ! -f "$rc" ] || [ ! -O "$rc" ] || [ ! -w "$rc" ]; }; }; then
+    warn "Cannot safely update $rc; add PATH manually."
+    return 1
+  fi
+  if ! mkdir -p "$parent" || [ ! -O "$parent" ] || [ ! -w "$parent" ]; then
+    warn "Cannot write shell config directory $parent; add PATH manually."
+    return 1
+  fi
+  tmp="$(mktemp "$rc.supercharge.tmp.XXXXXX")" || { warn "Cannot prepare $rc"; return 1; }
+  block="$(mktemp "$rc.supercharge.block.XXXXXX")" || { rm -f "$tmp"; warn "Cannot prepare $rc"; return 1; }
+  if ! path_block > "$block"; then
+    rm -f "$tmp" "$block"
+    warn "Cannot prepare PATH block for $rc"
+    return 1
+  fi
+  if [ -e "$rc" ]; then
+    # Preserve the existing permissions when atomically replacing the file.
+    if ! cp -p "$rc" "$tmp" || ! awk '
+      NR == FNR { block = block $0 "\n"; next }
+      $0 == "# >>> Supercharge AI PATH >>>" {
+        if (inside) { bad = 1; exit }
+        inside = 1
+        if (!found++) printf "%s", block
+        next
+      }
+      $0 == "# <<< Supercharge AI PATH <<<" {
+        if (!inside) { bad = 1; exit }
+        inside = 0; next
+      }
+      !inside { print }
+      END {
+        if (inside || bad) exit 1
+        if (!found) printf "\n%s", block
+      }
+    ' "$block" "$rc" > "$tmp"; then
+      rm -f "$tmp" "$block"
+      warn "Cannot update $rc (check permissions or malformed Supercharge PATH markers)."
+      return 1
+    fi
+    if cmp -s "$rc" "$tmp"; then
+      rm -f "$tmp" "$block"
+      ok "PATH already configured in $rc"
+      return 0
+    fi
+    backup="$(mktemp "$rc.supercharge.bak.XXXXXX")" || {
+      rm -f "$tmp" "$block"; warn "Cannot back up $rc; left unchanged."; return 1;
+    }
+    if ! cp -p "$rc" "$backup"; then
+      rm -f "$tmp" "$block" "$backup"
+      warn "Cannot back up $rc; left unchanged."
+      return 1
+    fi
+    ok "Backup: $backup"
+  elif ! cp "$block" "$tmp"; then
+    rm -f "$tmp" "$block"
+    warn "Cannot prepare $rc"
+    return 1
+  fi
+  rm -f "$block"
+  if ! mv -f "$tmp" "$rc"; then
+    rm -f "$tmp"
+    warn "Cannot save $rc; add PATH manually."
+    return 1
+  fi
+  ok "PATH configured in $rc"
+}
+
+configure_shell_path() {
+  local login_file config_dir result=0
+  case "$shell_name" in
+    bash)
+      update_shell_config "$HOME/.bashrc" || result=1
+      # Bash reads only the first existing login file. Do not create a new
+      # higher-priority file that hides the user's current login setup.
+      login_file="$HOME/.bash_profile"
+      for login_file in "$HOME/.bash_profile" "$HOME/.bash_login" "$HOME/.profile"; do
+        if [ -e "$login_file" ] || [ -L "$login_file" ]; then break; fi
+      done
+      if [ ! -e "$login_file" ] && [ ! -L "$login_file" ]; then login_file="$HOME/.bash_profile"; fi
+      update_shell_config "$login_file" || result=1
+      ;;
+    zsh)
+      config_dir="${ZDOTDIR:-$HOME}"
+      update_shell_config "$config_dir/.zshrc" || result=1
+      update_shell_config "$config_dir/.zprofile" || result=1
+      ;;
+    fish)
+      config_dir="${XDG_CONFIG_HOME:-$HOME/.config}"
+      update_shell_config "$config_dir/fish/config.fish" || result=1
+      ;;
+    *)
+      warn "Unsupported or unknown shell (${SHELL:-unset}); add $BIN_DIR to PATH manually."
+      return 1
+      ;;
+  esac
+  return "$result"
+}
+
+# A child installer cannot change its parent's PATH. Existing PATH directories
+# under HOME can make commands available immediately, without touching system
+# directories or shadowing an unrelated command anywhere on PATH.
+link_on_current_path() {
+  local name="$1" resolved entry physical home_physical remaining
+  resolved="$(type -P "$name" || true)"
+  if [ -n "$resolved" ]; then
+    if [ "$resolved" -ef "$BIN_DIR/$name" ]; then return 0; fi
+    warn "Keeping existing command $resolved; use the absolute Supercharge path."
+    return 1
+  fi
+  home_physical="$(cd "$HOME" && pwd -P)" || return 1
+  [ "$home_physical" != / ] || return 1
+  remaining="${PATH:-}"
+  while :; do
+    entry="${remaining%%:*}"
+    if [[ "$entry" = /* ]] && [ -d "$entry" ] && [ -O "$entry" ] && [ -w "$entry" ]; then
+      physical="$(cd "$entry" && pwd -P)" || physical=""
+      case "$physical" in
+        "$home_physical"/*)
+          if [ ! -e "$entry/$name" ] && [ ! -L "$entry/$name" ] &&
+            ln -s "$BIN_DIR/$name" "$entry/$name" 2>/dev/null; then
+            ok "Linked $entry/$name (already on PATH)"
+            return 0
+          fi
+          ;;
+      esac
+    fi
+    [[ "$remaining" = *:* ]] || break
+    remaining="${remaining#*:}"
+  done
+  return 1
+}
+
 banner
 
 case "$(uname -s)" in
@@ -142,7 +305,16 @@ tag="v${TARGET#v}"
 asset="supercharge-${platform}${ext}"
 base_url="https://github.com/${REPO}/releases/download/${tag}"
 
+# PATH entries cannot represent colons or newlines. Resolve relative install
+# directories once so startup files never depend on a future working directory.
+case "$BIN_DIR" in
+  *:* | *$'\n'* | *$'\r'*) die "SUPERCHARGE_BIN_DIR must not contain colons or newlines." ;;
+esac
 mkdir -p "$DOWNLOAD_DIR" "$BIN_DIR" "$CONFIG_HOME"
+BIN_DIR="$(cd "$BIN_DIR" && pwd -P)"
+case "$BIN_DIR" in
+  *:* | *$'\n'* | *$'\r'*) die "Resolved SUPERCHARGE_BIN_DIR must not contain colons or newlines." ;;
+esac
 binary_path="${DOWNLOAD_DIR}/supercharge-${TARGET}-${platform}${ext}"
 binary_tmp="${binary_path}.tmp.$$"
 
@@ -169,31 +341,59 @@ if [ "$os" = "windows" ]; then
   cp -f "$binary_path" "$BIN_DIR/sc.exe"
 else
   install -m 0755 "$binary_path" "$BIN_DIR/supercharge"
-  ln -sfn supercharge "$BIN_DIR/sc"
+  if [ ! -e "$BIN_DIR/sc" ] && [ ! -L "$BIN_DIR/sc" ]; then
+    ln -s supercharge "$BIN_DIR/sc"
+  elif [ ! "$BIN_DIR/sc" -ef "$BIN_DIR/supercharge" ]; then
+    warn "Keeping unrelated $BIN_DIR/sc; use supercharge instead."
+  fi
 fi
 ok "${BIN_DIR}/supercharge${ext}"
-ok "${BIN_DIR}/sc${ext}"
 
 step 4 "PATH"
-path_ok=0
-case ":${PATH}:" in
-  *":${BIN_DIR}:"*) path_ok=1 ;;
-esac
-if [ "$path_ok" = 1 ]; then
-  ok "already on PATH"
+# SHELL identifies the user's shell even when the installer is piped to bash.
+shell_name="${SHELL:-}"
+shell_name="${shell_name##*/}"
+shell_name="${shell_name%.exe}"
+if [ "${SUPERCHARGE_NO_MODIFY_PATH:-0}" = 1 ]; then
+  ok "Automatic PATH setup disabled (SUPERCHARGE_NO_MODIFY_PATH=1)"
 else
-  warn "not on PATH in this shell"
-  say "         ${c_dim}export PATH=\"${BIN_DIR}:\$PATH\"${c_reset}"
-  if [ "$os" = "windows" ]; then
-    say "         ${c_dim}Add %USERPROFILE%\\.local\\bin for cmd.exe / PowerShell.${c_reset}"
+  if configure_shell_path; then
+    ok "Persistent PATH setup complete; open a new terminal to load it."
+  else
+    warn "Persistent PATH setup incomplete; see the warnings above."
   fi
+  if [ "$os" != windows ]; then
+    link_on_current_path supercharge || true
+    if [ "$BIN_DIR/sc" -ef "$BIN_DIR/supercharge" ]; then link_on_current_path sc || true; fi
+  fi
+fi
+
+resolved="$(type -P "supercharge${ext}" || true)"
+if [ -n "$resolved" ] && [ "$resolved" -ef "$BIN_DIR/supercharge${ext}" ]; then
+  ok "supercharge is available on the inherited PATH (shell aliases or cached commands may need clearing)."
+else
+  warn "This installer cannot change the current parent shell's PATH."
+  case "$shell_name" in
+    bash | zsh)
+      say "         Run in your current shell:"
+      say "         export PATH=$(quote_path "$BIN_DIR")\"\${PATH:+:\$PATH}\""
+      ;;
+    fish)
+      say "         Run in your current shell:"
+      say "         set -gx PATH $(quote_path "$BIN_DIR" fish) \$PATH"
+      ;;
+    *) say "         Add $BIN_DIR to PATH using your shell's syntax." ;;
+  esac
+fi
+if [ "$os" = windows ]; then
+  say "         For cmd.exe / PowerShell PATH setup, use install.ps1 instead."
 fi
 
 say ""
 say "  ${c_green}${c_bold}Installed Supercharge AI ${TARGET}${c_reset}"
 say "  ${c_dim}Config: ${CONFIG_HOME}${c_reset}"
 say ""
-say "  Start:"
-say "    ${c_bold}supercharge${c_reset}"
-say "    ${c_bold}sc${c_reset}"
+say "  Start now (works without changing PATH):"
+say "    ${c_bold}$(quote_path "$BIN_DIR/supercharge${ext}" "$shell_name")${c_reset}"
+say "  Once PATH is loaded: supercharge (or sc, if no other command uses that name)."
 say ""

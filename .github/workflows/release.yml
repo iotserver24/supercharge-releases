@@ -143,6 +143,7 @@ jobs:
           chmod +x "$rg_bin"
           cp "$rg_bin" "$HOME/vendor/rg"
           echo "SUPERCHARGE_TOOLS_BUNDLE_RG_PATH=$HOME/vendor/rg" >> "$GITHUB_ENV"
+          echo "SUPERCHARGE_SHELL_BUNDLE_RG_PATH=$HOME/vendor/rg" >> "$GITHUB_ENV"
 
       - uses: actions/cache@v4
         with:

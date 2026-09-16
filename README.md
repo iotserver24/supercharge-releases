@@ -59,6 +59,7 @@ Release assets are named:
 | `SUPERCHARGE_GITHUB_REPO` | `iotserver24/supercharge-releases` | Alternate release repo |
 | `SUPERCHARGE_BIN_DIR` | `~/.local/bin` | Install location |
 | `SUPERCHARGE_HOME` | `~/.supercharge` | Config directory |
+| `SUPERCHARGE_NO_MODIFY_PATH` | `0` | Set to `1` to skip automatic shell config edits and extra PATH symlinks (bash installer) |
 
 ## After install
 
@@ -68,7 +69,23 @@ sc             # same binary
 supercharge --single "Explain this repo"
 ```
 
-Config is stored under `~/.supercharge/`. The Windows installer adds `~\.local\bin` to your user PATH (current session included).
+Config is stored under `~/.supercharge/`. The bash installer automatically adds the install directory to your shell startup files without sudo:
+
+- **bash:** `~/.bashrc` and the first existing login file (`~/.bash_profile`, `~/.bash_login`, or `~/.profile`); creates `~/.bash_profile` if none exists.
+- **zsh:** `.zshrc` and `.zprofile` in `$ZDOTDIR`, or your home directory.
+- **fish:** `$XDG_CONFIG_HOME/fish/config.fish`, defaulting to `~/.config/fish/config.fish`.
+
+Setup uses an idempotent managed block, honors `SUPERCHARGE_BIN_DIR`, and backs up existing files before changing them (`<file>.supercharge.bak.*`). Symlinked, unwritable, or malformed startup files are left alone with a warning. Custom install paths may contain spaces and shell special characters, but not colons or newlines.
+
+When safe, the installer also links the commands into an existing user-owned writable PATH directory inside your home directory. It does not overwrite or shadow an existing unrelated PATH command. Otherwise, **open a new terminal** or run the shell-specific PATH command printed at the end. A piped installer cannot change its parent shell's PATH; the printed absolute executable path works immediately. Shell aliases and cached commands may need clearing separately.
+
+For CI or manually managed shell configuration, disable these PATH changes on the installer side of the pipe:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/iotserver24/supercharge-releases/main/scripts/install.sh | SUPERCHARGE_NO_MODIFY_PATH=1 bash
+```
+
+The native Windows installer (`install.ps1`) adds `~\.local\bin` to your user PATH (current PowerShell session included). The bash installer configures the selected Unix-style shell only. Installation does not log in or change credentials.
 
 ## Releases
 

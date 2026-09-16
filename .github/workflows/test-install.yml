@@ -5,6 +5,7 @@ on:
     paths:
       - scripts/install.sh
       - scripts/install.ps1
+      - scripts/test-install.py
       - .github/workflows/test-install.yml
   pull_request:
   workflow_dispatch:
@@ -13,6 +14,31 @@ permissions:
   contents: read
 
 jobs:
+  offline:
+    name: Offline shell installer tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install test shells (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y zsh fish
+      - name: Install test shells (macOS)
+        if: runner.os == 'macOS'
+        run: brew install fish
+      - name: Syntax and isolated offline regression tests
+        shell: bash
+        run: |
+          bash -n scripts/install.sh
+          command -v bash
+          command -v zsh
+          command -v fish
+          python3 scripts/test-install.py
+
   install:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
